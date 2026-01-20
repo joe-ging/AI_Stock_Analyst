@@ -1,30 +1,23 @@
 import os
 import uvicorn
 import logging
+import httpx
+import asyncio
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import google.generativeai as genai
 from PyPDF2 import PdfReader
 from io import BytesIO
 
-# --- 0. 终极日志配置 ---
+# --- 0. 日志配置 ---
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger("JL-Backend")
+logger = logging.getLogger("JL-Backend-REST")
 
 # --- 1. 核心配置 ---
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
-
-if GOOGLE_API_KEY:
-    try:
-        genai.configure(api_key=GOOGLE_API_KEY)
-        logger.info(">>> Gemini API 基础配置已完成")
-    except Exception as e:
-        logger.error(f">>> API 配置崩溃: {str(e)}")
-else:
-    logger.warning(">>> 警告: 缺少 GOOGLE_API_KEY，请在 Render 后台 Environment 设置")
+# 必须在 Render 后台 Environment 变量中配置 GOOGLE_API_KEY
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 
 app = FastAPI()
 
@@ -37,31 +30,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 3. 首页与诊断路由 ---
 @app.get("/")
 @app.head("/")
 async def root():
-    return {"status": "active", "agent": "JL Intelligence AI Engine"}
+    # 根路由返回，用于 Render 健康检查和诊断
+    return {
+        "status": "active", 
+        "engine": "REST-v1-Stable", 
+        "region_mode": "US-West-Bypass"
+    }
 
-# 🟢 秘密诊断接口：如果你还是遇到 404，请在浏览器访问此地址
-@app.get("/debug/models")
-async def list_available_models():
-    if not GOOGLE_API_KEY:
-        return {"error": "API Key not configured"}
-    try:
-        # 获取 Google 允许你使用的所有模型列表
-        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        return {"available_models": models}
-    except Exception as e:
-        return {"error": str(e)}
-
-# --- 4. 稳健的 PDF 提取 ---
 def extract_text_from_pdf(file_content: bytes) -> str:
+    """提取 PDF 文本并截断，保护内存和 API 限制"""
     try:
         reader = PdfReader(BytesIO(file_content))
         text = ""
-        # 限制解析前 30 页，确保免费版内存不崩溃
-        max_pages = 30 
+        max_pages = 30 # 针对投研演示，前 30 页通常足够
         for i, page in enumerate(reader.pages):
             if i >= max_pages: break
             content = page.extract_text()
@@ -69,70 +53,93 @@ def extract_text_from_pdf(file_content: bytes) -> str:
                 text += content + "\n"
         return text.strip()
     except Exception as e:
-        logger.error(f">>> PDF 提取异常: {str(e)}")
+        logger.error(f"PDF 提取失败: {str(e)}")
         return ""
 
-# --- 5. 核心分析接口 (带全自动容错重试) ---
-@app.post("/analyze")
-async def analyze_document(
-    file: UploadFile = File(...), 
-    analysis_type: str = Form(...)
-):
-    if not GOOGLE_API_KEY:
-        raise HTTPException(status_code=500, detail="API Key 缺失")
-
-    logger.info(f">>> 收到请求: {file.filename}, 模式: {analysis_type}")
+async def call_gemini_rest(prompt: str, retries=5):
+    """
+    【核心修复逻辑】
+    不再使用 SDK，直接通过 HTTP 请求呼叫 Google 的 v1 稳定版 REST 接口。
+    这能彻底解决由于 SDK 自动选择 v1beta 导致的 404 错误。
+    """
+    # 锁死 v1 稳定路径
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GOOGLE_API_KEY}"
     
-    # 提取文本
-    file_bytes = await file.read()
-    raw_text = extract_text_from_pdf(file_bytes)
-    
-    if not raw_text or len(raw_text) < 10:
-        raise HTTPException(status_code=400, detail="无法从 PDF 提取文字，请检查文件格式")
-    
-    # 截断文本防止 Token 超限 (约 45,000 字符)
-    safe_text = raw_text[:45000] 
-
-    prompts = {
-        "comprehensive": "你是一位华夏基金资深投研分析师。请对这份财报进行深度投资分析。使用精美的 Markdown 格式。",
-        "compliance": "你是一位资深合规官。请审查文档的风险提示、违规用语及 ESG 披露。列出建议。",
-        "quick": "你是一位基金经理助理。极速提取核心：一句话总结、三个关键数字、最大利好和风险。"
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
     }
     
-    final_prompt = f"{prompts.get(analysis_type, prompts['comprehensive'])}\n\n内容概要:\n{safe_text}"
-    
-    # 🟡 核心改动：多模型名字轮询测试 (针对之前的 404 错误)
-    # 顺序：带 latest 的稳定版 -> 标准版 -> 深度 Pro 版 -> 旧版 Pro
-    candidate_models = [
-        'gemini-1.5-flash-latest', 
-        'gemini-1.5-flash', 
-        'gemini-1.5-pro-latest',
-        'gemini-pro'
-    ]
-    
-    last_error = ""
-    
-    for model_name in candidate_models:
-        try:
-            logger.info(f">>> 尝试使用模型: {model_name} ...")
-            model_instance = genai.GenerativeModel(model_name)
-            response = model_instance.generate_content(final_prompt)
-            
-            if response and response.text:
-                logger.info(f">>> 成功！使用的模型是: {model_name}")
-                return {
-                    "analysis": f"> **引擎诊断：** 已自动匹配最兼容引擎 ({model_name})\n\n" + response.text
-                }
-        except Exception as e:
-            last_error = str(e)
-            logger.warning(f">>> 模型 {model_name} 失败: {last_error}")
-            # 继续尝试下一个模型名字
-            continue
+    async with httpx.AsyncClient() as client:
+        for i in range(retries):
+            try:
+                logger.info(f">>> 正在通过 REST v1 接口连接模型 (重试 {i+1})...")
+                response = await client.post(url, json=payload, timeout=90.0)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    # 解析 Google REST API 返回的 JSON 结构
+                    return data['candidates'][0]['content']['parts'][0]['text']
+                
+                # 处理限流或临时错误
+                if response.status_code in [429, 500, 503]:
+                    wait_time = (2 ** i)
+                    logger.warning(f"API 繁忙 ({response.status_code})，正在进行退避重试...")
+                    await asyncio.sleep(wait_time)
+                    continue
+                
+                # 其他错误直接抛出报错详情
+                error_data = response.json().get('error', {})
+                error_msg = error_data.get('message', 'Unknown API Error')
+                raise Exception(f"Google API 报错: {error_msg}")
+                
+            except Exception as e:
+                if i == retries - 1:
+                    raise e
+                await asyncio.sleep(2 ** i)
+    return None
 
-    # 如果所有候选者都试过了还是不行
-    logger.error(">>> 致命错误: 所有 AI 引擎路径均不可用")
-    raise HTTPException(status_code=500, detail=f"AI 引擎连接全线失败。最后一次报错: {last_error}")
+@app.post("/analyze")
+async def analyze_document(file: UploadFile = File(...), analysis_type: str = Form(...)):
+    if not GOOGLE_API_KEY:
+        raise HTTPException(status_code=500, detail="API Key 缺失，请检查环境变量设置")
+
+    logger.info(f">>> 接收到分析请求: {file.filename}, 模式: {analysis_type}")
+    
+    # 1. 读取并提取文本
+    content = await file.read()
+    raw_text = extract_text_from_pdf(content)
+    
+    if not raw_text or len(raw_text) < 10:
+        raise HTTPException(status_code=400, detail="无法从 PDF 中提取有效文字，请检查文件格式")
+
+    # 2. 截断文本防止请求过载 (40,000 字符)
+    safe_text = raw_text[:40000]
+
+    # 3. 提示词匹配
+    prompts = {
+        "comprehensive": "你是一位华夏基金资深投研分析师。请对这份财报进行深度投资分析。使用精美 Markdown 格式。",
+        "compliance": "你是一位资深合规官。请审查文档的风险提示、违规用语及 ESG 披露。列出建议。",
+        "quick": "你是一位基金经理助理。极速提取核心数据：一句话总结、三个关键数字、亮点和风险。"
+    }
+    
+    base_prompt = prompts.get(analysis_type, prompts["comprehensive"])
+    final_input = f"{base_prompt}\n\n[内容如下]:\n{safe_text}"
+    
+    # 4. 执行 REST 调用
+    try:
+        analysis_result = await call_gemini_rest(final_input)
+        if not analysis_result:
+            raise HTTPException(status_code=500, detail="AI 返回结果为空")
+            
+        # 返回格式兼容你目前的前端
+        return {"analysis": analysis_result}
+    except Exception as e:
+        logger.error(f">>> 引擎运行故障: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"AI 分析失败: {str(e)}")
 
 if __name__ == "__main__":
+    # 获取 Render 端口
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)

@@ -2,4 +2,4 @@ fastapi
 uvicorn
 pypdf2
 python-multipart
-google-genai
+google-genai>=1.55.0

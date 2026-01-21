@@ -1,27 +1,26 @@
 import os
 import uvicorn
 import logging
+import gc  # 🟢 引入内存管理
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from google import genai  # 🟢 使用 1.55.0+ 版本的最新引用
+from google import genai
 from PyPDF2 import PdfReader
 from io import BytesIO
+import time
 
 # --- 0. 日志配置 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
-logger = logging.getLogger("JL-Backend-Interactions")
+logger = logging.getLogger("JL-Memory-Guard")
 
 # --- 1. 核心配置 ---
-# 根据最新文档，优先读取 GEMINI_API_KEY
 API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
 app = FastAPI()
-
-# 🟢 初始化最新的 Client
-# 这一步会自动处理 API 版本路径（v1beta/v1），无需我们手动拼接
 client = genai.Client(api_key=API_KEY)
+START_TIME = time.time()
 
-# --- 2. 跨域配置 (CORS) ---
+# --- 2. 跨域配置 ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,75 +32,75 @@ app.add_middleware(
 @app.get("/")
 @app.head("/")
 async def root():
-    return {
-        "status": "active", 
-        "mode": "Interactions-API-Beta", 
-        "sdk_version": ">=1.55.0"
-    }
+    """轻量级健康检查"""
+    return {"status": "online", "mem_optimization": "active"}
 
-def extract_text_from_pdf(file_content: bytes) -> str:
-    """PDF 文字提取"""
+def extract_text_lightweight(file_content: bytes) -> str:
+    """【核心优化】极简 PDF 提取，处理完立刻释放内存"""
     try:
         reader = PdfReader(BytesIO(file_content))
         text = ""
-        for i, page in enumerate(reader.pages[:30]): # 演示限制 30 页
-            content = page.extract_text()
-            if content:
-                text += content + "\n"
+        # 🟢 限制为 8 页。对于 512MB 内存来说，这是最安全的红线。
+        for i, page in enumerate(reader.pages[:8]): 
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted + "\n"
+        
+        # 销毁对象，强制回收
+        del reader
+        gc.collect() 
         return text.strip()
     except Exception as e:
-        logger.error(f"PDF 提取失败: {e}")
+        logger.error(f"PDF 解析失败: {e}")
         return ""
 
 @app.post("/analyze")
 async def analyze_document(file: UploadFile = File(...), analysis_type: str = Form(...)):
     if not API_KEY:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY is missing")
+        raise HTTPException(status_code=500, detail="API_KEY_MISSING")
 
-    logger.info(f">>> 正在处理文件: {file.filename}, 模式: {analysis_type}")
+    logger.info(f">>> 正在处理: {file.filename}")
     
-    file_bytes = await file.read()
-    raw_text = extract_text_from_pdf(file_bytes)
+    # 1. 提取文字并释放原始字节流
+    content = await file.read()
+    raw_text = extract_text_lightweight(content)
+    del content # 立刻删除巨大的原始字节流
+    gc.collect()
     
-    if not raw_text or len(raw_text) < 10:
-        raise HTTPException(status_code=400, detail="Could not extract text from PDF")
+    if not raw_text:
+        raise HTTPException(status_code=400, detail="CANNOT_READ_PDF")
 
-    # 准备 Prompt
+    # 2. 提示词路由
     prompts = {
         "comprehensive": "你是一位华夏基金资深分析师。请对这份财报进行深度投资分析。使用精美 Markdown 格式。",
         "compliance": "你是一位资深合规官。请审查文档的风险提示和合规性。",
-        "quick": "你是一位基金经理助理。极速提取核心：一句话总结、三个关键数字、亮点和风险。"
+        "quick": "你是一位助理。极速提取核心：一句话总结、三个关键数字、亮点和风险。"
     }
     
-    final_prompt = f"{prompts.get(analysis_type, '分析这份财报')}\n\n内容概要:\n{raw_text[:40000]}"
+    final_prompt = f"{prompts.get(analysis_type)}\n\n[内容概要]:\n{raw_text[:20000]}"
     
+    # 清理掉 raw_text，因为我们已经组装好 prompt 了
+    del raw_text
+    gc.collect()
+
     try:
-        # 🟢 【核心修复】：使用最新的 Interactions API 语法
-        # 这会自动寻找最适合的 v1beta/interactions 路径
-        logger.info(">>> 正在发起交互式推理请求...")
-        interaction = client.interactions.create(
-            model="gemini-2.5-flash", # 文档中提到的新模型 ID
-            input=final_prompt
+        logger.info(">>> 启动 AI 推理引擎...")
+        # 🟢 始终使用 flash 模型，它比 pro 模型省电、省内存、速度快
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=final_prompt
         )
         
-        # 🟢 从 Interaction 对象中提取最后一次输出的文本
-        analysis_text = interaction.outputs[-1].text
+        analysis_result = response.text
+        gc.collect() # 推理完再扫一遍
         
-        logger.info(">>> 分析成功")
-        return {"analysis": analysis_text}
+        logger.info(">>> 分析成功，已强行回收内存")
+        return {"analysis": analysis_result}
 
     except Exception as e:
-        logger.error(f">>> AI 响应失败: {str(e)}")
-        # 如果 gemini-2.5-flash 还没完全开放，尝试自动降级到常用模型
-        try:
-            logger.info(">>> 尝试降级到 gemini-1.5-flash...")
-            interaction = client.interactions.create(
-                model="gemini-1.5-flash",
-                input=final_prompt
-            )
-            return {"analysis": interaction.outputs[-1].text}
-        except:
-            raise HTTPException(status_code=500, detail=f"AI 引擎拒绝请求: {str(e)}")
+        logger.error(f">>> 引擎异常: {str(e)}")
+        gc.collect()
+        raise HTTPException(status_code=500, detail=f"AI Engine Busy: {str(e)}")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))

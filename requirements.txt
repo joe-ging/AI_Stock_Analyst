@@ -2,4 +2,4 @@ fastapi
 uvicorn
 pypdf2
 python-multipart
-httpx
+google-genai

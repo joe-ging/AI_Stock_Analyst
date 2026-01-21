@@ -1,26 +1,28 @@
 import os
 import uvicorn
 import logging
-import gc  # 🟢 引入内存管理
+import gc  # 内存回收垃圾箱
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from google import genai
+from google import genai  # 2026 最新 SDK
 from PyPDF2 import PdfReader
 from io import BytesIO
 import time
 
 # --- 0. 日志配置 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
-logger = logging.getLogger("JL-Memory-Guard")
+logger = logging.getLogger("JL-Ultimate-Stable")
 
 # --- 1. 核心配置 ---
+# 确保在 Render 中设置了 GEMINI_API_KEY
 API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
 app = FastAPI()
-client = genai.Client(api_key=API_KEY)
-START_TIME = time.time()
 
-# --- 2. 跨域配置 ---
+# 初始化 Client
+client = genai.Client(api_key=API_KEY)
+
+# --- 2. 跨域配置 (CORS) ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,23 +34,22 @@ app.add_middleware(
 @app.get("/")
 @app.head("/")
 async def root():
-    """轻量级健康检查"""
-    return {"status": "online", "mem_optimization": "active"}
+    return {"status": "online", "mode": "Interactions-Memory-Hybrid"}
 
 def extract_text_lightweight(file_content: bytes) -> str:
-    """【核心优化】极简 PDF 提取，处理完立刻释放内存"""
+    """【内存优化】解析 PDF 并在提取后立即释放内存"""
     try:
         reader = PdfReader(BytesIO(file_content))
         text = ""
-        # 🟢 限制为 8 页。对于 512MB 内存来说，这是最安全的红线。
-        for i, page in enumerate(reader.pages[:8]): 
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted + "\n"
+        # 🟢 维持 10 页限制，这是 512MB 内存的最安全红线
+        for i, page in enumerate(reader.pages[:10]):
+            content = page.extract_text()
+            if content:
+                text += content + "\n"
         
-        # 销毁对象，强制回收
+        # 强制清理对象
         del reader
-        gc.collect() 
+        gc.collect()
         return text.strip()
     except Exception as e:
         logger.error(f"PDF 解析失败: {e}")
@@ -59,48 +60,54 @@ async def analyze_document(file: UploadFile = File(...), analysis_type: str = Fo
     if not API_KEY:
         raise HTTPException(status_code=500, detail="API_KEY_MISSING")
 
-    logger.info(f">>> 正在处理: {file.filename}")
+    logger.info(f">>> 正在处理文件: {file.filename}")
     
-    # 1. 提取文字并释放原始字节流
-    content = await file.read()
-    raw_text = extract_text_lightweight(content)
-    del content # 立刻删除巨大的原始字节流
+    # 读取并提取
+    file_bytes = await file.read()
+    raw_text = extract_text_lightweight(file_bytes)
+    
+    # 立刻清理原始字节流
+    del file_bytes
     gc.collect()
     
-    if not raw_text:
-        raise HTTPException(status_code=400, detail="CANNOT_READ_PDF")
+    if not raw_text or len(raw_text) < 10:
+        raise HTTPException(status_code=400, detail="Could not extract text from PDF")
 
-    # 2. 提示词路由
+    # 提示词
     prompts = {
-        "comprehensive": "你是一位华夏基金资深分析师。请对这份财报进行深度投资分析。使用精美 Markdown 格式。",
+        "comprehensive": "你是一位华夏基金资深投研分析师。请对这份财报进行深度投资分析。使用精美 Markdown 格式。",
         "compliance": "你是一位资深合规官。请审查文档的风险提示和合规性。",
-        "quick": "你是一位助理。极速提取核心：一句话总结、三个关键数字、亮点和风险。"
+        "quick": "你是一位基金经理助理。极速提取核心：一句话总结、三个关键数字、亮点和风险。"
     }
     
+    # 进一步截断文本以确保 Payload 安全
     final_prompt = f"{prompts.get(analysis_type)}\n\n[内容概要]:\n{raw_text[:20000]}"
     
-    # 清理掉 raw_text，因为我们已经组装好 prompt 了
+    # 释放文本内存
     del raw_text
     gc.collect()
 
     try:
-        logger.info(">>> 启动 AI 推理引擎...")
-        # 🟢 始终使用 flash 模型，它比 pro 模型省电、省内存、速度快
-        response = client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=final_prompt
+        # 🟢 【恢复成功点】：使用之前测试成功的 Interactions API 语法
+        # 这会自动映射到 /v1beta/interactions，绕过 404 错误
+        logger.info(">>> 发起交互式 AI 推理 (Interactions API)...")
+        interaction = client.interactions.create(
+            model="gemini-1.5-flash", 
+            input=final_prompt
         )
         
-        analysis_result = response.text
-        gc.collect() # 推理完再扫一遍
+        analysis_result = interaction.outputs[-1].text
         
-        logger.info(">>> 分析成功，已强行回收内存")
+        # 最终内存清理
+        gc.collect()
+        
+        logger.info(">>> 分析成功，内存已回收")
         return {"analysis": analysis_result}
 
     except Exception as e:
-        logger.error(f">>> 引擎异常: {str(e)}")
+        logger.error(f">>> AI 推理异常: {str(e)}")
         gc.collect()
-        raise HTTPException(status_code=500, detail=f"AI Engine Busy: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"AI Engine Error: {str(e)}")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))

@@ -1,26 +1,189 @@
-# JL Intelligence AI Financial Analysis Tool (v1.8.1)
-Scanning Company Filings and Check Compliance with Gemini 3 Pro API
+# 📊 10-K Intelligence Parser
 
-Developer: Jing Zhou (Margot)
-Tech Stack: React, Tailwind CSS, FastAPI (Python), Google Gemini GenAI SDK
-Deployment: Render (Backend), Netlify (Frontend)
-🌐 Live Production Links
-User Interface: https://jl-intelligence.netlify.app/
-Inference Engine: https://ai-stock-analyst-us.onrender.com
-1. Project Vision & Mission
-The tool was conceptualized as an institutional-grade AI research prototype. The objective was to bridge the gap between raw LLM capabilities and the specific requirements of professional investment research, focusing on deep document scanning and compliance auditing.
-2. Technical Architecture & SDK Implementation
-We transitioned from a static REST API model to the Google GenAI SDK (v1.55.0+).
-Interactions API: Leveraging the modern "Interactions" path to provide stateful reasoning and superior model routing.
-Dual-Path Fallback Logic: The backend includes a fail-safe mechanism that hot-swaps to the legacy "GenerateContent" path if the primary route encounters latency.
-3. The "Efficiency vs. Depth" Trade-off (Technical Note)
-Query: Does the tool read the entirety of a 200+ page report?
-Current Prototype Implementation: To maintain 99.9% uptime on a restricted 512MB RAM server, the current script utilizes a "High-Alpha Sampling" strategy. It prioritizes the first 10 pages (Executive Summary, Consolidated Financials, and Management Guidance) and truncates the context to 25,000 characters.
-Production-Grade Scaling Path: In a commercial deployment (e.g., for ChinaAMC), we would implement one of the following two paths to handle "Infinite Depth":
-RAG (Retrieval-Augmented Generation): Pre-processing the 200+ pages into a Vector Database (Pinecone/Milvus), allowing the AI to "search and retrieve" specific sections as needed without loading the entire text into RAM.
-Paid Tier Infrastructure: Upgrading to a server with 8GB+ RAM would allow for the full utilization of Gemini 1.5 Pro’s 1-million-token context window, enabling the model to ingest and cross-reference the entire document simultaneously.
-4. Critical Engineering Challenges & Solutions
-Memory Optimization: Implemented gc.collect() and manual del object cycles to clear the heap during PDF parsing.
-Diagnostic Heartbeat: Built a React monitor to manage "cold starts," ensuring zero downtime for C-suite demos.
-5. Conclusion
-This tool demonstrates the ability to build resilient, compliant AI systems under tight resource constraints—a core requirement for the next generation of financial technology leadership.
+> AI-powered SEC 10-K filing analysis tool for institutional investors. Upload any company's annual report — get instant compliance audits, risk analysis, and executive briefs in English, Simplified Chinese, or Traditional Chinese.
+
+**Live Demo:** [AI Stock Analyst](https://ai-stock-analyst.onrender.com) · **Tech Stack:** React · Tailwind CSS · FastAPI · Google Gemini
+
+---
+
+## 🔹 Current Architecture (Prototype)
+
+The prototype is designed for rapid demo deployment on a constrained 512MB RAM server.
+
+```
+Frontend (index.html)          Backend (main.py)              External
+┌─────────────────────┐       ┌──────────────────────┐       ┌──────────┐
+│ React + Tailwind CSS│──POST─│ FastAPI              │──API──│ Gemini   │
+│ - PDF Upload        │ /analyze│ - PyPDF2 extraction │       │ 2.5 Flash│
+│ - 3 Analysis Modes  │       │ - Language routing   │       │ (or 1.5) │
+│ - EN/ZH-CN/ZH-HK   │       │ - gc.collect() RAM   │       └──────────┘
+│ - Markdown render   │◄─JSON─│ - 25k char truncation│
+└─────────────────────┘       └──────────────────────┘
+```
+
+### How It Works
+
+1. **Frontend**: Single-page React app. User uploads a PDF and selects an analysis type:
+   - 📋 **Comprehensive** — Deep institutional research report
+   - 🔍 **Compliance** — Risk disclosure audit with red flags
+   - ⚡ **Quick Brief** — 3-minute executive summary
+2. **Backend**: FastAPI with a single `/analyze` endpoint. PyPDF2 extracts text from the **first 10 pages** only (RAM constraint). Text is truncated to 25,000 characters.
+3. **LLM Routing**: Dual-path failover — tries Gemini 2.5 Flash Interactions API first, falls back to Gemini 1.5 Flash if the newer API is unavailable.
+4. **Limitations**: No vector database, no semantic chunking, no caching, no evaluation pipeline. Cannot cross-reference data across the full 200+ page filing.
+
+### Current Architecture Diagram
+
+```mermaid
+graph TD
+    classDef pres fill:#3b82f6,stroke:#2563eb,color:#fff
+    classDef svc fill:#10b981,stroke:#059669,color:#fff
+    classDef store fill:#f59e0b,stroke:#d97706,color:#fff
+
+    UI["React + Tailwind SPA"] -->|POST /analyze| FA["FastAPI (512MB)"]
+    FA -->|PyPDF2 first 10 pages| PDF["PDF Extractor"]
+    FA -->|Path A| G25["Gemini 2.5 Flash"]
+    FA -.->|Path B fallback| G15["Gemini 1.5 Flash"]
+    FA -->|JSON| UI
+
+    class UI pres
+    class FA,PDF svc
+    class G25,G15 store
+```
+
+---
+
+## 🔹 Who Uses This and Why
+
+### What is a 10-K?
+
+A **200–300 page annual report** that every US public company must file with the SEC. It covers revenue, risk factors, lawsuits, debt obligations, management strategy, and more. Think of it as a company's **full medical checkup report** — except it's written by lawyers.
+
+### Who are "institutional analysts"?
+
+Professional investors at firms like **China AMC (华夏基金)**, Fidelity, or Goldman Sachs who manage billions of dollars. They read **hundreds** of these reports per year. They don't read 10-Ks for fun — they read them because they **must**, and they need answers fast.
+
+### What do they actually search for?
+
+| Role | What They Do (Plain English) | What They Search For | Example Keywords |
+|:---|:---|:---|:---|
+| **Buy-Side Researcher** | "Should we buy this stock?" — compares promises vs reality | Revenue growth vs last year's guidance | `revenue`, `guidance`, `outlook`, `YoY growth` |
+| **Risk Analyst** | "What could go wrong?" — finds hidden dangers | All sentences mentioning potential threats | `risk factor`, `China`, `tariff`, `supply chain`, `litigation` |
+| **Compliance Officer** | "Is this company being honest?" — checks rule compliance | Auditor red flags, financial restatements | `restatement`, `going concern`, `material weakness`, `SOX` |
+| **Portfolio Manager** | "Give me the TL;DR in 3 minutes" — speed over depth | Key financial numbers only | `EPS`, `capex`, `buyback`, `dividend`, `forward guidance` |
+| **Credit Analyst** | "Can this company pay its debts?" — checks financial health | Debt schedules, loan covenants | `maturity`, `covenant`, `interest coverage`, `credit facility` |
+| **ESG Analyst** | "Is this company hurting the planet or people?" — sustainability | Environmental lawsuits, diversity data | `carbon`, `emissions`, `diversity`, `environmental litigation`, `SASB` |
+
+### Why can't they just Ctrl+F?
+
+1. **Scale**: 200+ pages per filing × dozens of companies per analyst
+2. **Scattered data**: Revenue in Item 7, risk in Item 1A, debt in Item 8 notes — all cross-referenced
+3. **Tables**: Financial tables need to be parsed structurally, not as raw text
+4. **Audit trail**: Analysts need **citations with exact page numbers** — "Revenue increased 8% YoY (10-K p.47, para 3)" — or their compliance team rejects the analysis
+
+---
+
+## 🔹 Production Architecture (Ideal Design)
+
+**Target Scale:** 100 PDFs/day · 100MB each · Institutional-grade compliance
+
+### Ingestion Pipeline (Async — processes PDFs in background)
+
+1. **PDF Upload** → Celery Task Queue (RabbitMQ broker)
+2. **Layout Parser** (Docling/Unstructured) → structure-aware chunking that preserves tables, footnotes, and section headers
+3. **Embedding** → `text-embedding-3-large` (1536-dim) → Milvus HNSW Index
+4. **Metadata tagging**: `company_ticker`, `fiscal_year`, `section_id`, `page_number`
+
+### Query Pipeline (Sync — answers analyst questions in real-time)
+
+1. **Analyst query** → FastAPI Gateway → Redis Semantic Cache (cosine > 0.95 = cache hit, <50ms)
+2. **Cache miss** → Milvus hybrid search (dense + BM25) → top-20 candidate chunks
+3. **Cohere Reranker** → top-5 chunks with page citations
+4. **LangGraph State Machine**: Router Agent → Retrieval Agent → Auditor Agent (cross-reference validation loop)
+5. **Model Cascade**: simple queries → Gemini Flash ($); complex cross-references → GPT-4o ($$$)
+6. **Response**: `"Revenue increased 8% YoY (10-K p.47, para 3)"`
+
+### Evaluation & Monitoring
+
+- **Ragas**: Faithfulness > 0.90, Context Recall > 0.85, Answer Relevancy > 0.80
+- **Gold Dataset**: 100 manually verified analyst Q&A pairs for regression testing
+- **G-Eval gate**: Blocks deployment if quality scores drop below thresholds
+- **Token cost**: Target <$0.15/query average
+
+### Production Architecture Diagram
+
+```mermaid
+graph TD
+    classDef pres fill:#3b82f6,stroke:#2563eb,color:#fff
+    classDef svc fill:#10b981,stroke:#059669,color:#fff
+    classDef store fill:#f59e0b,stroke:#d97706,color:#fff
+
+    subgraph INGEST["Async Ingestion"]
+        UP["Upload API"] -.->|async| CQ[("RabbitMQ")]
+        CQ -.->|consume| LP["Layout Parser"]
+        LP -->|chunks| EMB["Embedder"]
+        EMB -->|vectors| MV[("Milvus")]
+        EMB -->|metadata| PG[("PostgreSQL")]
+    end
+
+    subgraph QUERY["Sync Query"]
+        AN["Analyst Portal"] -->|HTTPS| AG["API Gateway"]
+        AG -->|check| RC[("Redis Cache")]
+        AG -->|search| RS["Retriever"]
+        RS -->|ANN| MV
+        RS -->|rerank| RR["Reranker"]
+        RR -->|top-5| LG["LangGraph"]
+    end
+
+    subgraph LLM["Models"]
+        LG -->|simple| GF["Gemini Flash"]
+        LG -->|complex| GP["GPT-4o"]
+    end
+
+    LG -.->|audit| KF[("Kafka")] -.-> LS["LangSmith"]
+
+    class AN,AG pres
+    class UP,LP,EMB,RS,RR,LG svc
+    class CQ,MV,PG,RC,KF,GF,GP,LS store
+```
+
+---
+
+## 🔹 Technical Decisions: Current → Production
+
+| Decision | Current Prototype | Production Target | Why |
+|:---|:---|:---|:---|
+| **PDF Parsing** | PyPDF2 (text-only, first 10 pages) | Docling (layout-aware, full document) | Preserves table structure and footnotes |
+| **Chunking** | 25k char truncation | Semantic structure-based (parent-child) | Tables stay intact, section context preserved |
+| **Vector DB** | None | Milvus HNSW (self-hosted) | Data sovereignty for institutional clients |
+| **Caching** | None | Redis semantic cache (cosine > 0.95) | 60% token savings, <50ms for repeat queries |
+| **LLM** | Single Gemini call | Model cascade (Flash → Pro) | 70% cost reduction on simple queries |
+| **Evaluation** | None | Ragas + G-Eval Gold Dataset | Faithfulness regression gate on every deploy |
+| **Scaling** | Single 512MB server | K8s EKS + KEDA auto-scale | Handle 100 concurrent PDF uploads |
+
+---
+
+## 🚀 Quick Start
+
+```bash
+# Clone
+git clone https://github.com/joe-ging/AI_Stock_Analyst.git
+cd AI_Stock_Analyst
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Set your Gemini API key
+export GEMINI_API_KEY="your-key-here"
+
+# Run
+python main.py
+# Server starts at http://localhost:10000
+```
+
+Open `index.html` in your browser, upload a 10-K PDF, and select your analysis type.
+
+---
+
+## 📄 License
+
+MIT

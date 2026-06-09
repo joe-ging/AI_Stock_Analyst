@@ -2,7 +2,7 @@
 
 > AI-powered SEC 10-K filing analysis tool for institutional investors. Upload any company's annual report — get instant compliance audits, risk analysis, and executive briefs in English, Simplified Chinese, or Traditional Chinese.
 
-**Live Demo:** [AI Stock Analyst](https://ai-stock-analyst.onrender.com) · **Tech Stack:** React · Tailwind CSS · FastAPI · Google Gemini
+**Live Demo:** [JL Intelligence](https://jl-intelligence.netlify.app/) · **Tech Stack:** React · Tailwind CSS · FastAPI · Google Gemini
 
 ---
 
@@ -34,20 +34,14 @@ Frontend (index.html)          Backend (main.py)              External
 ### Current Architecture Diagram
 
 ```mermaid
-graph TD
-    classDef pres fill:#3b82f6,stroke:#2563eb,color:#fff
-    classDef svc fill:#10b981,stroke:#059669,color:#fff
-    classDef store fill:#f59e0b,stroke:#d97706,color:#fff
-
-    UI["React + Tailwind SPA"] -->|POST /analyze| FA["FastAPI (512MB)"]
-    FA -->|PyPDF2 first 10 pages| PDF["PDF Extractor"]
-    FA -->|Path A| G25["Gemini 2.5 Flash"]
-    FA -.->|Path B fallback| G15["Gemini 1.5 Flash"]
-    FA -->|JSON| UI
-
-    class UI pres
-    class FA,PDF svc
-    class G25,G15 store
+graph LR
+    A[React SPA] -->|POST /analyze| B[FastAPI 512MB]
+    B --> C[PyPDF2 Extractor]
+    B -->|Path A| D[Gemini 2.5 Flash]
+    B -.->|Path B Fallback| E[Gemini 1.5 Flash]
+    D --> F[JSON Response]
+    E --> F
+    F --> A
 ```
 
 ---
@@ -102,6 +96,33 @@ Professional investors at firms like **China AMC (华夏基金)**, Fidelity, or 
 5. **Model Cascade**: simple queries → Gemini Flash ($); complex cross-references → GPT-4o ($$$)
 6. **Response**: `"Revenue increased 8% YoY (10-K p.47, para 3)"`
 
+### Why LangGraph Instead of Direct Milvus Search?
+
+Direct vector search works for **simple single-hop queries** like *"What was AAPL's 2024 revenue?"* — one search, one answer.
+
+But institutional analysts ask **multi-hop questions** that require cross-referencing across sections:
+
+> *"Compare AAPL's revenue growth over the past 3 years against management's forward guidance. Did they deliver on their promises?"*
+
+This requires:
+1. **Router Agent** — classifies this as a multi-hop query (not a simple factoid)
+2. **Retrieval Agent (Pass 1)** — searches Milvus for Item 7 (MD&A) guidance paragraphs
+3. **Retrieval Agent (Pass 2)** — searches Milvus again for Item 8 revenue tables (3 years)
+4. **Auditor Agent** — cross-references the numbers, checks footnotes for restatements
+5. **Loop back** if validation fails — retrieves additional context until numbers are consistent
+
+```
+Simple RAG:     Query → Milvus → LLM → Answer (one shot, hope for the best)
+
+LangGraph:      Query → Router → Retriever → Auditor ──┐
+                                     ↑                  │
+                                     └── validation fail ┘
+                                          ↓ pass
+                                        Answer (with page citations)
+```
+
+The Auditor loop is what pushes our **Faithfulness score above 0.90** — it catches hallucinated numbers before they reach the analyst.
+
 ### Evaluation & Monitoring
 
 - **Ragas**: Faithfulness > 0.90, Context Recall > 0.85, Answer Relevancy > 0.80
@@ -113,37 +134,33 @@ Professional investors at firms like **China AMC (华夏基金)**, Fidelity, or 
 
 ```mermaid
 graph TD
-    classDef pres fill:#3b82f6,stroke:#2563eb,color:#fff
-    classDef svc fill:#10b981,stroke:#059669,color:#fff
-    classDef store fill:#f59e0b,stroke:#d97706,color:#fff
-
-    subgraph INGEST["Async Ingestion"]
-        UP["Upload API"] -.->|async| CQ[("RabbitMQ")]
-        CQ -.->|consume| LP["Layout Parser"]
-        LP -->|chunks| EMB["Embedder"]
-        EMB -->|vectors| MV[("Milvus")]
-        EMB -->|metadata| PG[("PostgreSQL")]
+    subgraph Ingestion
+        A[PDF Upload API] --> B[RabbitMQ]
+        B --> C[Layout Parser]
+        C --> D[Embedding Service]
+        D --> E[(Milvus)]
+        D --> F[(PostgreSQL)]
     end
 
-    subgraph QUERY["Sync Query"]
-        AN["Analyst Portal"] -->|HTTPS| AG["API Gateway"]
-        AG -->|check| RC[("Redis Cache")]
-        AG -->|search| RS["Retriever"]
-        RS -->|ANN| MV
-        RS -->|rerank| RR["Reranker"]
-        RR -->|top-5| LG["LangGraph"]
+    subgraph Query
+        G[Analyst Portal] --> H[API Gateway]
+        H --> I[(Redis Cache)]
+        H --> J[Retrieval Service]
+        J --> E
+        J --> K[Cohere Reranker]
+        K --> L[LangGraph Orchestrator]
     end
 
-    subgraph LLM["Models"]
-        LG -->|simple| GF["Gemini Flash"]
-        LG -->|complex| GP["GPT-4o"]
+    subgraph Models
+        L -->|simple| M[Gemini Flash]
+        L -->|complex| N[GPT-4o]
     end
 
-    LG -.->|audit| KF[("Kafka")] -.-> LS["LangSmith"]
-
-    class AN,AG pres
-    class UP,LP,EMB,RS,RR,LG svc
-    class CQ,MV,PG,RC,KF,GF,GP,LS store
+    subgraph Observability
+        L --> O[Kafka]
+        O --> P[LangSmith Traces]
+        O --> Q[Ragas Eval]
+    end
 ```
 
 ---
@@ -156,6 +173,7 @@ graph TD
 | **Chunking** | 25k char truncation | Semantic structure-based (parent-child) | Tables stay intact, section context preserved |
 | **Vector DB** | None | Milvus HNSW (self-hosted) | Data sovereignty for institutional clients |
 | **Caching** | None | Redis semantic cache (cosine > 0.95) | 60% token savings, <50ms for repeat queries |
+| **Orchestration** | None (single LLM call) | LangGraph multi-agent with Auditor loop | Multi-hop queries + hallucination prevention |
 | **LLM** | Single Gemini call | Model cascade (Flash → Pro) | 70% cost reduction on simple queries |
 | **Evaluation** | None | Ragas + G-Eval Gold Dataset | Faithfulness regression gate on every deploy |
 | **Scaling** | Single 512MB server | K8s EKS + KEDA auto-scale | Handle 100 concurrent PDF uploads |
